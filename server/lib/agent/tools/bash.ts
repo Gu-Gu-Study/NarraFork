@@ -262,6 +262,11 @@ async function prepareBashExecution(
 	};
 }
 
+function normalizeBashStop(stop: string | undefined): string | undefined {
+	// Some models fill unused optional string fields with an empty string.
+	return stop === "" ? undefined : stop;
+}
+
 export const bashTool: ToolDefinition = {
 	name: SHELL_TOOL_NAME,
 	executionRouting: {
@@ -289,7 +294,7 @@ export const bashTool: ToolDefinition = {
 			},
 			stop: {
 				description:
-					"Stop a running background bash task by its ID or alias (must belong to this narrator). When provided, no new command is launched. Mutually exclusive with `command`.",
+					"Stop a running background bash task by its ID or alias (must belong to this narrator). A non-empty value stops the task instead of launching a command; an empty string is treated as omitted. Mutually exclusive with `command`.",
 				type: "string",
 			},
 			timeout: {
@@ -373,7 +378,7 @@ export const bashTool: ToolDefinition = {
 				.string()
 				.optional()
 				.describe(
-					"Stop a running background bash task by its ID or alias (must belong to this narrator). When provided, no new command is launched. Mutually exclusive with `command`.",
+					"Stop a running background bash task by its ID or alias (must belong to this narrator). A non-empty value stops the task instead of launching a command; an empty string is treated as omitted. Mutually exclusive with `command`.",
 				),
 			timeout: z
 				.number()
@@ -419,6 +424,7 @@ export const bashTool: ToolDefinition = {
 					"Opt in to parallel execution for this command. Default is false — consecutive Bash calls run sequentially. Set true only when this command is independent of every other tool call in the same turn.",
 				),
 		})
+		.overwrite((input) => ({ ...input, stop: normalizeBashStop(input.stop) }))
 		.superRefine((input, ctx) => {
 			if (input.stop !== undefined && input.background_kind !== undefined) {
 				ctx.addIssue({
@@ -447,7 +453,7 @@ export const bashTool: ToolDefinition = {
 		};
 		const {
 			command,
-			stop,
+			stop: rawStop,
 			timeout,
 			workdir,
 			description,
@@ -466,6 +472,7 @@ export const bashTool: ToolDefinition = {
 			parallel?: boolean;
 			device?: string;
 		};
+		const stop = normalizeBashStop(rawStop);
 
 		if (
 			background_kind !== undefined &&

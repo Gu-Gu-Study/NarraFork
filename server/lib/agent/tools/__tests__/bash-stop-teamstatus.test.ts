@@ -650,6 +650,84 @@ describe("Bash background kinds", () => {
 		).toBe(true);
 	});
 
+	test.each([
+		undefined,
+		"task",
+	] as const)("normalizes an empty stop before validation and task defaults (kind=%s)", (backgroundKind) => {
+		const parsed = bashTool.parameters.parse({
+			command: "fixture",
+			stop: "",
+			background_kind: backgroundKind,
+			run_in_background: false,
+		});
+		expect(parsed).toMatchObject({ command: "fixture", background_kind: "task" });
+		expect(parsed).toHaveProperty("stop", undefined);
+	});
+
+	test.each([false, true])("empty stop commands reach execution (parsed=%s)", async (parsed) => {
+		seed();
+		const handle: ExecHandle = {
+			exited: Promise.resolve(0),
+			onData(callback) {
+				callback(new TextEncoder().encode("fixture output"));
+			},
+			isExited: () => true,
+			kill: async () => {},
+		};
+		const execCommand = mock(async () => handle);
+		const backend: ExecutionBackend = Object.assign(Object.create(localBackend), {
+			kind: "remote",
+			deviceId: "remote-fixture",
+			defaultCwd: "/workspace",
+			execCommand,
+		});
+		const ctx = makeCtx("parent");
+		ctx.resolveBackend = () => backend;
+		ctx.executionTarget = {
+			deviceId: "remote-fixture",
+			backendKind: "remote",
+			cwd: "/workspace",
+			pathFlavor: backend.pathFlavor,
+			runtimeGeneration: backend.runtimeGeneration,
+			selectionSource: "explicit",
+		};
+		const input = {
+			command: "fixture",
+			stop: "",
+			background_kind: "task",
+			run_in_background: false,
+			parallel: false,
+			strict_serial: false,
+		} as const;
+		const result = await bashTool.execute(parsed ? bashTool.parameters.parse(input) : input, ctx);
+		expect(result.isError).toBeFalsy();
+		expect(result.output).toContain("fixture output");
+		expect(execCommand).toHaveBeenCalledTimes(1);
+		expect(cancelled).toEqual([]);
+		expect(tasks.size).toBe(0);
+	});
+
+	test("empty stop does not relax service requirements or supply a command", async () => {
+		for (const runInBackground of [false, true]) {
+			const input = {
+				command: "fixture",
+				stop: "",
+				background_kind: "service",
+				run_in_background: runInBackground,
+			} as const;
+			expect(bashTool.parameters.safeParse(input).success).toBe(runInBackground);
+		}
+		const invalidService = await bashTool.execute(
+			{ command: "fixture", stop: "", background_kind: "service" },
+			makeCtx("parent"),
+		);
+		expect(invalidService.isError).toBe(true);
+		expect(invalidService.output).toContain("requires run_in_background:true");
+		const empty = await bashTool.execute({ stop: "", background_kind: "task" }, makeCtx("parent"));
+		expect(empty.isError).toBe(true);
+		expect(empty.output).toContain("Provide either `command`");
+	});
+
 	test("direct execution rejects invalid kind combinations before permissions", async () => {
 		const ctx = makeCtx("parent");
 		let permissions = 0;
