@@ -3142,31 +3142,6 @@ function parseSSELine(
 		];
 	}
 
-	// Usage-only chunk (sent when stream_options.include_usage is true).
-	// This arrives as a separate chunk with no choices.
-	// Convert to usage event for context window tracking.
-	if (chunk.usage && (!chunk.choices || chunk.choices.length === 0)) {
-		const promptTokens = chunk.usage.prompt_tokens;
-		logger.debug("OpenAI usage-only chunk", {
-			hasPromptTokens: promptTokens != null,
-			usage: chunk.usage,
-		});
-		if (promptTokens != null) {
-			return [
-				{
-					usage: {
-						promptTokens,
-						inputTokens: promptTokens,
-						completionTokens: chunk.usage.completion_tokens,
-						reasoningTokens: chunk.usage.completion_tokens_details?.reasoning_tokens ?? undefined,
-						cachedInputTokens: chunk.usage.prompt_tokens_details?.cached_tokens ?? undefined,
-					},
-				},
-			];
-		}
-		return [];
-	}
-
 	// ── Responses API: function call start (item with call_id + name) ──
 	// Some gateways (e.g. Codex-compatible proxies) wrap the OpenAI Responses API
 	// in a Chat Completions–like SSE envelope. Tool calls arrive as:
@@ -3274,11 +3249,24 @@ function parseSSELine(
 
 	// ── Standard Chat Completions format below ──
 
+	// Relays may attach usage to a content/tool/finish chunk instead of a separate
+	// choices=[] chunk. Emit the counters independently, then process every lane.
+	const results: ParsedStreamEvent[] = [];
+	if (chunk.usage?.prompt_tokens != null) {
+		results.push({
+			usage: {
+				promptTokens: chunk.usage.prompt_tokens,
+				inputTokens: chunk.usage.prompt_tokens,
+				completionTokens: chunk.usage.completion_tokens,
+				reasoningTokens: chunk.usage.completion_tokens_details?.reasoning_tokens ?? undefined,
+				cachedInputTokens: chunk.usage.prompt_tokens_details?.cached_tokens ?? undefined,
+			},
+		});
+	}
 	const choice = chunk.choices?.[0];
-	if (!choice) return [];
+	if (!choice) return results;
 
 	const delta = choice.delta;
-	const results: ParsedStreamEvent[] = [];
 	const result: ParsedStreamEvent = {};
 
 	// A chunk may contain all three lanes. Publish content before any tool can

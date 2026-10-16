@@ -930,7 +930,11 @@ describe("OpenAIProvider Responses history reasoning continuation", () => {
 		const result = await provider.buildHistory(dbMessages, "openai:gpt-5");
 		const historyJson = JSON.stringify(result.history);
 		expect(historyJson).toContain('"role":"developer"');
-		expect(historyJson).toContain(savedPath);
+		expect(
+			(result.history as Array<{ role: string; content?: unknown }>).find(
+				(message) => message.role === "developer",
+			)?.content,
+		).toContain(savedPath);
 		expect(historyJson).toContain('"type":"image_generation_call"');
 		expect(historyJson).toContain('"id":"ig_saved"');
 		expect(historyJson).toContain('"revised_prompt":"a saved blue square"');
@@ -1276,6 +1280,115 @@ describe("OpenAIProvider Responses history reasoning continuation", () => {
 });
 
 describe("OpenAIProvider lightweight streaming generation", () => {
+	test.each([
+		"finish",
+		"content",
+		"separate",
+	] as const)("preserves text and usage from a completions %s chunk", async (placement) => {
+		const provider = new OpenAIProvider({ ...TEST_PROVIDER, apiMode: "completions" });
+		const originalFetch = globalThis.fetch;
+		const usage = {
+			prompt_tokens: 199261,
+			completion_tokens: 7,
+			prompt_tokens_details: { cached_tokens: 100 },
+			completion_tokens_details: { reasoning_tokens: 2 },
+		};
+		const chunks = [
+			{
+				choices: [{ index: 0, delta: { content: "测试成功。" }, finish_reason: null }],
+				...(placement === "content" ? { usage } : {}),
+			},
+			{
+				choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+				...(placement === "finish" ? { usage } : {}),
+			},
+			...(placement === "separate" ? [{ choices: [], usage }] : []),
+		];
+		globalThis.fetch = (async () =>
+			new Response(
+				`${chunks.map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`).join("")}data: [DONE]\n\n`,
+				{ headers: { "content-type": "text/event-stream" } },
+			)) as unknown as typeof fetch;
+		try {
+			const result = await provider.generateWithMeta("test", "openai:gpt-5");
+			expect(result.text).toBe("测试成功。");
+			expect(result.usage).toMatchObject({
+				inputTokens: 199261,
+				outputTokens: 7,
+				cachedInputTokens: 100,
+				reasoningTokens: 2,
+			});
+		} finally {
+			globalThis.fetch = originalFetch;
+		}
+	});
+
+	test.each([
+		"tool_calls",
+		"length",
+	] as const)("keeps mixed usage, content and %s state in narrator chat", async (finishReason) => {
+		const provider = new OpenAIProvider({ ...TEST_PROVIDER, apiMode: "completions" });
+		const originalFetch = globalThis.fetch;
+		const chunk = {
+			choices: [
+				{
+					index: 0,
+					delta: {
+						content: "Checking.",
+						reasoning_content: "Inspect the file.",
+						...(finishReason === "tool_calls"
+							? {
+									tool_calls: [
+										{
+											index: 0,
+											id: "call_usage",
+											type: "function",
+											function: { name: "Read", arguments: '{"file_path":"README.md"}' },
+										},
+									],
+								}
+							: {}),
+					},
+					finish_reason: finishReason,
+				},
+			],
+			usage: { prompt_tokens: 0, completion_tokens: 7 },
+		};
+		globalThis.fetch = (async () =>
+			new Response(`data: ${JSON.stringify(chunk)}\n\ndata: [DONE]\n\n`, {
+				headers: { "content-type": "text/event-stream" },
+			})) as unknown as typeof fetch;
+		try {
+			const events = [];
+			for await (const event of provider.chat({
+				conversationId: "usage-mixed",
+				content: "test",
+				model: "openai:gpt-5",
+				cwd: ".",
+				history: [],
+				tools: [],
+				toolResults: [],
+				signal: new AbortController().signal,
+			}))
+				events.push(event);
+			expect(events.filter((event) => event.usage).map((event) => event.usage)).toEqual([
+				{ promptTokens: 0, inputTokens: 0, completionTokens: 7 },
+			]);
+			expect(events.map((event) => event.text ?? "").join("")).toBe("Checking.");
+			expect(events.map((event) => event.reasoning ?? "").join("")).toBe("Inspect the file.");
+			if (finishReason === "tool_calls") {
+				expect(
+					events.some(
+						(event) => event.toolUseChunk?.toolUseId === "call_usage" && event.toolUseChunk.stop,
+					),
+				).toBe(true);
+			} else {
+				expect(events.some((event) => event.invalidState?.reason === "max_tokens")).toBe(true);
+			}
+		} finally {
+			globalThis.fetch = originalFetch;
+		}
+	});
 	test.each([
 		["responses", "responses"],
 		["codex", "responses"],
